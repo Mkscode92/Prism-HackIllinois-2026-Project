@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from classifier import classify_review
-from fix_generator import generate_fix
+from fix_generator import generate_fix, refine_fix
 from github_client.pr_creator import create_pr
 from rag.indexer import ensure_repo_indexed
 from rag.searcher import search_code
@@ -327,12 +327,6 @@ async def run_pipeline(review: PlayStoreReview) -> None:
         await _emit(rid, {"type": "done"})
         return
 
-    if classification.intent == "feature":
-        await _emit(rid, {"type": "stage", "stage": "classify", "status": "success", "message": "Feature request — no code fix needed"})
-        for s in ["rag", "fix", "sandbox", "pr"]:
-            await _emit(rid, {"type": "stage", "stage": s, "status": "skip", "message": "Skipped (feature request)"})
-        await _emit(rid, {"type": "done"})
-        return
 
     # ------------------------------------------------------------------
     # Stage 2: RAG
@@ -385,28 +379,60 @@ async def run_pipeline(review: PlayStoreReview) -> None:
     await _emit(rid, {"type": "stage", "stage": "fix", "status": "success", "message": f"Patched {len(fix.patches)} file(s)"})
 
     # ------------------------------------------------------------------
-    # Stage 4: Sandbox validation
+    # Stage 4: Sandbox validation (with one lint-error retry)
     # ------------------------------------------------------------------
-    await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "running", "message": "Validating patch in Modal sandbox..."})
-    try:
-        sandbox_result = await loop.run_in_executor(
-            None, functools.partial(run_in_sandbox, repo, fix)
-        )
-        if sandbox_result.success:
-            await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "success", "message": "Lint ✓  Tests ✓"})
-        else:
-            lint = "✓" if sandbox_result.lint_passed else "✕"
-            tests = "✓" if sandbox_result.test_passed else "✕"
-            await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "error", "message": f"Lint {lint}  Tests {tests} — not opening PR"})
-            await _emit(rid, {"type": "stage", "stage": "pr", "status": "skip", "message": "Skipped (validation failed)"})
+    MAX_LINT_RETRIES = 1
+    current_fix = fix
+    sandbox_result = None
+
+    for attempt in range(MAX_LINT_RETRIES + 1):
+        attempt_label = f"attempt {attempt + 1}/{MAX_LINT_RETRIES + 1}"
+        await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "running",
+                          "message": f"Validating patch in Modal sandbox... ({attempt_label})"})
+        try:
+            sandbox_result = await loop.run_in_executor(
+                None, functools.partial(run_in_sandbox, repo, current_fix)
+            )
+        except Exception as exc:
+            logger.exception("[%s] Sandbox failed", rid)
+            await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "error", "message": str(exc)})
+            await _emit(rid, {"type": "stage", "stage": "pr", "status": "skip", "message": "Skipped"})
             await _emit(rid, {"type": "done"})
             return
-    except Exception as exc:
-        logger.exception("[%s] Sandbox failed", rid)
-        await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "error", "message": str(exc)})
-        await _emit(rid, {"type": "stage", "stage": "pr", "status": "skip", "message": "Skipped"})
+
+        if sandbox_result.success:
+            break
+
+        # Lint failed — try asking Gemini to self-correct (only on first failure)
+        if not sandbox_result.lint_passed and attempt < MAX_LINT_RETRIES:
+            logger.info("[%s] Lint failed — asking Gemini to self-correct", rid)
+            await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "running",
+                              "message": f"Lint errors found — asking Gemini to self-correct... (attempt {attempt + 2}/{MAX_LINT_RETRIES + 1})"})
+            try:
+                refined = await loop.run_in_executor(
+                    None, functools.partial(
+                        refine_fix, current_fix, sandbox_result.lint_output,
+                        classification, code_chunks, repo
+                    )
+                )
+                if refined:
+                    current_fix = refined
+                    continue
+            except Exception:
+                logger.exception("[%s] refine_fix failed", rid)
+        break  # No more retries or lint passed
+
+    fix = current_fix
+    if not sandbox_result.success:
+        lint = "✓" if sandbox_result.lint_passed else "✕"
+        tests = "✓" if sandbox_result.test_passed else "✕"
+        await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "error",
+                          "message": f"Lint {lint}  Tests {tests} — not opening PR"})
+        await _emit(rid, {"type": "stage", "stage": "pr", "status": "skip", "message": "Skipped (validation failed)"})
         await _emit(rid, {"type": "done"})
         return
+
+    await _emit(rid, {"type": "stage", "stage": "sandbox", "status": "success", "message": "Lint ✓  Tests ✓"})
 
     # ------------------------------------------------------------------
     # Stage 5: Open PR

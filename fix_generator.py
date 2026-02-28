@@ -142,6 +142,79 @@ def generate_fix(
     return FixResult(patches=patches, explanation=args["explanation"])
 
 
+def refine_fix(
+    original_fix: FixResult,
+    lint_errors: str,
+    classification: ClassificationResult,
+    code_chunks: list[CodeChunk],
+    repo_url: str,
+) -> FixResult | None:
+    """
+    Ask Gemini to correct a patch that failed lint validation.
+    Sends the original patches + lint error output so Gemini can self-correct.
+    """
+    lines: list[str] = []
+
+    lines.append("## Original Review")
+    lines.append(f"> {classification.review_text}")
+
+    lines.append("\n## Lint Errors in Your Previous Patch")
+    lines.append("Your previous patch failed lint validation with these errors. Fix them:")
+    lines.append("```")
+    lines.append(lint_errors.strip())
+    lines.append("```")
+
+    lines.append("\n## Your Previous Patches (contain the errors above)")
+    for file_path, content in original_fix.patches.items():
+        ext = file_path.rsplit(".", 1)[-1] if "." in file_path else ""
+        lines.append(f"\n### `{file_path}`")
+        lines.append(f"```{ext}")
+        lines.append(content)
+        lines.append("```")
+
+    lines.append("\n## Original Code Context")
+    for chunk in code_chunks:
+        ext = chunk.file_path.rsplit(".", 1)[-1] if "." in chunk.file_path else ""
+        lines.append(f"\n### `{chunk.file_path}` — `{chunk.function_name}()`")
+        lines.append(f"```{ext}")
+        lines.append(chunk.source_text)
+        lines.append("```")
+
+    lines.append(f"\n## Repository\n{repo_url}")
+    lines.append("\nReturn corrected complete file content with all syntax errors fixed.")
+
+    config = types.GenerateContentConfig(
+        system_instruction=FIX_SYSTEM,
+        tools=[types.Tool(function_declarations=[PROPOSE_FIX_FUNC])],
+        tool_config=types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode="ANY",
+                allowed_function_names=["propose_fix"]
+            )
+        ),
+    )
+
+    response = client.models.generate_content(
+        model=settings.gemini_model,
+        contents="\n".join(lines),
+        config=config,
+    )
+
+    try:
+        fc = response.candidates[0].content.parts[0].function_call
+        args = fc.args
+    except (AttributeError, IndexError):
+        logger.error("Gemini failed to return a valid function call for refine_fix")
+        return None
+
+    if not args.get("patches"):
+        logger.warning("Gemini declined to generate refined patches")
+        return None
+
+    patches = {p["file_path"]: p["patched_source"] for p in args["patches"]}
+    return FixResult(patches=patches, explanation=args["explanation"])
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
