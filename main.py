@@ -19,7 +19,7 @@ from config import settings
 from classifier import classify_review
 from fix_generator import generate_fix, refine_fix
 from github_client.pr_creator import create_pr
-from poller import poll_loop
+from poller import fetch_reviews_debug, poll_app_once, poll_loop
 from rag.indexer import ensure_repo_indexed
 from rag.searcher import search_code
 from sandbox.runner import run_in_sandbox
@@ -150,14 +150,16 @@ def get_reviews():
 # ---------------------------------------------------------------------------
 
 class AppRegistration(BaseModel):
-    package_name: str   # e.g. com.example.myapp
-    repo_url: str       # e.g. https://github.com/org/repo
+    package_name: str  
+    repo_url: str       
 
 
 @app.post("/api/apps")
-def register_app(body: AppRegistration):
+async def register_app(body: AppRegistration):
     _app_registry[body.package_name] = body.repo_url
     logger.info("Registered app: %s → %s", body.package_name, body.repo_url)
+    # Poll immediately so the user doesn't wait up to 10 minutes for the first results
+    asyncio.create_task(poll_app_once(body.package_name, body.repo_url, _handle_scraped_review))
     return {"status": "ok", "registered": dict(_app_registry)}
 
 
@@ -170,6 +172,31 @@ def remove_app(package_name: str):
 @app.get("/api/apps")
 def list_apps():
     return _app_registry
+
+
+@app.post("/api/poll-now")
+async def poll_now():
+    """Manually trigger an immediate poll for all registered apps."""
+    if not _app_registry:
+        return {"status": "no_apps"}
+    for pkg, repo in list(_app_registry.items()):
+        asyncio.create_task(poll_app_once(pkg, repo, _handle_scraped_review))
+    return {"status": "polling", "apps": list(_app_registry.keys())}
+
+
+@app.get("/api/poll-debug")
+async def poll_debug():
+    """
+    Fetch the 30 newest reviews for all registered apps WITHOUT any filtering,
+    and annotate each with why it was or wasn't selected. Use this to diagnose
+    why reviews aren't appearing in the pending queue.
+    """
+    if not _app_registry:
+        return {"status": "no_apps", "results": {}}
+    results = {}
+    for pkg in list(_app_registry.keys()):
+        results[pkg] = await fetch_reviews_debug(pkg)
+    return {"status": "ok", "results": results}
 
 
 # ---------------------------------------------------------------------------
@@ -255,23 +282,6 @@ async def stream_pipeline(review_id: str):
 # ---------------------------------------------------------------------------
 
 def _parse_review(data: dict, message_id: str) -> PlayStoreReview | None:
-    """
-    Real Play Store notification (from GCP Pub/Sub):
-      {
-        "packageName": "com.example.app",
-        "reviewNotification": {
-          "review": {
-            "reviewId": "...",
-            "authorName": "...",
-            "comments": [{ "userComment": { "text": "...", "starRating": 1 } }]
-          }
-        }
-      }
-    The repo_url is resolved from APP_PACKAGE_NAME / APP_REPO_URL in .env.
-
-    Manual test format (submitted from the UI form):
-      { "repo_url": "...", "reviewId": "...", "comments": [...] }
-    """
     # Real Play Store notification
     if "reviewNotification" in data:
         package_name = data.get("packageName", "")
@@ -307,11 +317,11 @@ def _parse_review(data: dict, message_id: str) -> PlayStoreReview | None:
 @app.post("/webhook")
 async def webhook(payload: PubSubPayload, background_tasks: BackgroundTasks):
     """
-    Receive a GCP Pub/Sub push message.
+    Receive a Pub/Sub push message.
 
     Handles two formats:
     - Real Play Store notification: contains 'reviewNotification' and 'packageName'.
-      repo_url is resolved from APP_PACKAGE_NAME / APP_REPO_URL in config.
+      repo_url is resolved from the registered app registry.
     - Manual test submission from the UI: contains 'repo_url' and 'comments' directly.
     """
     try:

@@ -147,7 +147,7 @@ def _run_pipeline(sandbox: modal.Sandbox, repo_url: str, fix: FixResult) -> Sand
 
 
 def _validate_python(sandbox: modal.Sandbox) -> SandboxResult:
-    # Install dependencies (best-effort)
+    # install dependencies in the sandbox cause it'll need to test the proposed code on the clone of the repo in it
     _exec(
         sandbox,
         "cd /workspace/repo && "
@@ -191,7 +191,6 @@ def _validate_kotlin(sandbox: modal.Sandbox, fix: FixResult) -> SandboxResult:
             test_passed=True,
         )
 
-    # Lint only the patched files (not the whole repo) to avoid pre-existing violations
     file_args = " ".join(f'"/workspace/repo/{f}"' for f in kt_files)
     lint_output, lint_code = _exec(sandbox, f"ktlint {file_args} 2>&1")
     lint_passed = lint_code == 0

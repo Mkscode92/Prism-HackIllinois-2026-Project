@@ -19,14 +19,11 @@ class Settings(BaseSettings):
     # GitHub
     github_token: str = Field(..., validation_alias="GITHUB_TOKEN")
 
-    # GCP
-    gcp_project_id: str = Field(..., validation_alias="GCP_PROJECT_ID")
-
     # Modal
     modal_app_name: str = Field("prism-sandbox", validation_alias="MODAL_APP_NAME")
 
     # Poller
-    poll_interval_seconds: int = Field(600, validation_alias="POLL_INTERVAL_SECONDS")
+    poll_interval_seconds: int = Field(900, validation_alias="POLL_INTERVAL_SECONDS")
     max_pending_reviews: int = Field(10, validation_alias="MAX_PENDING_REVIEWS")
 
     model_config = {

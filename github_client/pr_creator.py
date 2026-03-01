@@ -166,12 +166,6 @@ def _build_pr_body(
         qs = "\n".join(f"{i}. {q}" for i, q in enumerate(classification.follow_up_questions, 1))
         follow_up_section = f"\n### Follow-up Questions Generated\n{qs}\n"
 
-    lint_status = "PASSED" if sandbox_result.lint_passed else "FAILED"
-    test_status = "PASSED" if sandbox_result.test_passed else "FAILED"
-
-    lint_out = (sandbox_result.lint_output or "(no output)").strip()[:2000]
-    test_out = (sandbox_result.test_output or "(no output)").strip()[:3000]
-
     files_list = "\n".join(f"- `{f}`" for f in fix.files_changed)
     star = f"{classification.star_rating}/5" if classification.star_rating else "N/A"
 
