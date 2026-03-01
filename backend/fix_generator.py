@@ -10,32 +10,22 @@ logger = logging.getLogger("prism.fix_generator")
 
 client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-# ---------------------------------------------------------------------------
-# Data contracts
-# ---------------------------------------------------------------------------
-
 @dataclass
 class CodeChunk:
-    file_path: str        # Relative path inside the repo
+    file_path: str       
     function_name: str
     source_text: str
-    score: float          # Pinecone cosine similarity score
-
+    score: float         
 
 @dataclass
 class FixResult:
-    patches: dict[str, str]      # { relative_file_path: full_patched_source }
-    explanation: str              # Summary of root cause and fix
+    patches: dict[str, str]      
+    explanation: str             
     files_changed: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.files_changed:
             self.files_changed = list(self.patches.keys())
-
-
-# ---------------------------------------------------------------------------
-# Tool definition
-# ---------------------------------------------------------------------------
 
 PROPOSE_FIX_TOOL = {
     "name": "propose_fix",
@@ -92,18 +82,13 @@ Rules:
 - Preserve all existing functionality unrelated to the fix.
 """.strip()
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+# key logic via claude to propose a code fix 
 
 def generate_fix(
     classification: ClassificationResult,
     code_chunks: list[CodeChunk],
     repo_url: str,
 ) -> FixResult | None:
-    """
-    Ask Claude to propose a code fix based on the user review and relevant code context.
-    """
     user_message = _build_context_message(classification, code_chunks, repo_url)
 
     response = client.messages.create(
@@ -137,10 +122,6 @@ def refine_fix(
     code_chunks: list[CodeChunk],
     repo_url: str,
 ) -> FixResult | None:
-    """
-    Ask Claude to correct a patch that failed lint validation.
-    Sends the original patches + lint error output so Claude can self-correct.
-    """
     lines: list[str] = []
 
     lines.append("## Original Review")
@@ -200,10 +181,6 @@ def refine_fix(
     patches = {p["file_path"]: p["patched_source"] for p in args["patches"]}
     return FixResult(patches=patches, explanation=args["explanation"])
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 _KTLINT_ERROR_RE = re.compile(r"/workspace/repo/(.+?):(\d+):\d+: (.+)")
 
