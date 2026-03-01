@@ -9,3 +9,7 @@ Inspiration:
 
 What it does:
 - Prism is an AI-powered automation agent that monitors app reviews for a particular Google Play app and programmatically generates tested, secure pull requests (suggestions for code improvements) to fix reported issues.
+
+ 
+Built With:
+python, claude, fastapi, githubapi, googleplayscraper, html, modal, pineconedb, voyageapi
